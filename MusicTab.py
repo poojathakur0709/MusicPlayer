@@ -16,7 +16,13 @@ from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 
+import smbus as smbus 
+import subprocess
+import time
 
+import dbus, dbus.mainloop.glib
+import sys,os
+from gi.repository import GLib
 
 mixer.init()
 musiclist=[]
@@ -26,7 +32,23 @@ count = 0
 songLength = 0
 index = 0
 
+
+i2c = smbus.SMBus(1) # newer version RASP (512 megabytes)
+i2c_address = 0x60
+
+
 class Ui_MainWindow(object):
+    #BLE Variable
+    status="playing"
+    track = "no Music"
+    player_iface = None
+    transport_prop_iface = None
+    bus = None
+    obj = None
+    mgr=None 
+    
+    freq = 100.1
+    #####
     def setupUi(self, MainWindow):
         MainWindow.setObjectName("MainWindow")
         MainWindow.resize(1280, 720)
@@ -155,6 +177,8 @@ class Ui_MainWindow(object):
         self.MusicMenu.setObjectName("MusicMenu")
         self.FMTab = QtWidgets.QWidget()
         self.FMTab.setObjectName("FMTab")
+        
+        self.init_radio(i2c_address)#
         self.ChannelFrequencyLabel = QtWidgets.QLabel(self.FMTab)
         self.ChannelFrequencyLabel.setGeometry(QtCore.QRect(393, 136, 165, 91))
         self.ChannelFrequencyLabel.setStyleSheet("color: rgb(255, 255, 255);\n"
@@ -181,6 +205,9 @@ class Ui_MainWindow(object):
         self.FMForwardButton.setIcon(icon)
         self.FMForwardButton.setIconSize(QtCore.QSize(40, 71))
         self.FMForwardButton.setObjectName("FMForwardButton")
+        self.FMForwardButton.clicked.connect(self.next_fm)
+        
+        
         self.FMBackwardButton = QtWidgets.QPushButton(self.FMTab)
         self.FMBackwardButton.setGeometry(QtCore.QRect(137, 136, 90, 110))
         self.FMBackwardButton.setText("")
@@ -189,6 +216,10 @@ class Ui_MainWindow(object):
         self.FMBackwardButton.setIcon(icon1)
         self.FMBackwardButton.setIconSize(QtCore.QSize(40, 71))
         self.FMBackwardButton.setObjectName("FMBackwardButton")
+        self.FMBackwardButton.clicked.connect(self.prev_fm)
+        
+        
+        
         self.Channel1Button = QtWidgets.QPushButton(self.FMTab)
         self.Channel1Button.setGeometry(QtCore.QRect(100, 320, 140, 140))
         self.Channel1Button.setStyleSheet("border:1px solid rgb(255, 255, 255);\n"
@@ -282,8 +313,20 @@ class Ui_MainWindow(object):
         icon5 = QtGui.QIcon()
         icon5.addPixmap(QtGui.QPixmap(":/NotificationPanel/icons/FMTabIcon.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.MusicMenu.addTab(self.FMTab, icon5, "")
+        
+        
+        
         self.BTTab = QtWidgets.QWidget()
         self.BTTab.setObjectName("BTTab")
+        
+        #BLE CODE
+        
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        self.bus = dbus.SystemBus()
+        self.obj = self.bus.get_object('org.bluez', "/")
+        self.mgr = dbus.Interface(self.obj, 'org.freedesktop.DBus.ObjectManager')
+       
+        
         self.BTControlPanelBox = QtWidgets.QLabel(self.BTTab)
         self.BTControlPanelBox.setGeometry(QtCore.QRect(0, 550, 1020, 100))
         self.BTControlPanelBox.setStyleSheet("border-top:1px solid rgb(255, 255, 255);")
@@ -297,6 +340,8 @@ class Ui_MainWindow(object):
         self.PreviousSongBTButton.setIcon(icon6)
         self.PreviousSongBTButton.setIconSize(QtCore.QSize(40, 40))
         self.PreviousSongBTButton.setObjectName("PreviousSongBTButton")
+        self.PreviousSongBTButton.clicked.connect(self.previous_song)
+        
         self.BTcontrolLine1 = QtWidgets.QFrame(self.BTTab)
         self.BTcontrolLine1.setGeometry(QtCore.QRect(461, 575, 1, 50))
         self.BTcontrolLine1.setStyleSheet("color: rgb(255, 255, 255);")
@@ -311,6 +356,8 @@ class Ui_MainWindow(object):
         self.PlaySongBTButton.setIcon(icon7)
         self.PlaySongBTButton.setIconSize(QtCore.QSize(40, 40))
         self.PlaySongBTButton.setObjectName("PlaySongBTButton")
+        self.PlaySongBTButton.clicked.connect(self.play_pause)
+        
         self.BTcontrolLine2 = QtWidgets.QFrame(self.BTTab)
         self.BTcontrolLine2.setGeometry(QtCore.QRect(560, 575, 1, 50))
         self.BTcontrolLine2.setStyleSheet("color: rgb(255, 255, 255);")
@@ -325,6 +372,8 @@ class Ui_MainWindow(object):
         self.NextSongBTButton.setIcon(icon8)
         self.NextSongBTButton.setIconSize(QtCore.QSize(40, 40))
         self.NextSongBTButton.setObjectName("NextSongBTButton")
+        self.NextSongBTButton.clicked.connect(self.next_song)
+        
         self.PlayerIconBT = QtWidgets.QLabel(self.BTTab)
         self.PlayerIconBT.setGeometry(QtCore.QRect(410, 65, 200, 200))
         self.PlayerIconBT.setText("")
@@ -366,6 +415,9 @@ class Ui_MainWindow(object):
         icon9 = QtGui.QIcon()
         icon9.addPixmap(QtGui.QPixmap(":/NotificationPanel/icons/BTTabIcon.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.MusicMenu.addTab(self.BTTab, icon9, "")
+        
+        
+        
         self.USBTab = QtWidgets.QWidget()
         self.USBTab.setObjectName("USBTab")
         self.ReloadUSBButton = QtWidgets.QPushButton(self.USBTab)
@@ -520,7 +572,95 @@ class Ui_MainWindow(object):
         self.MusicMenu.setCurrentIndex(1)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
     
+        for path, ifaces in self.mgr.GetManagedObjects().items():
+            if 'org.bluez.MediaPlayer1' in ifaces:
+                self.player_iface = dbus.Interface(
+                        self.bus.get_object('org.bluez', path),
+                        'org.bluez.MediaPlayer1')
+                self.bt_player_connect_label.setText("Connected")
+                
+            elif 'org.bluez.MediaTransport1' in ifaces:
+                self.transport_prop_iface = dbus.Interface(
+                        self.bus.get_object('org.bluez', path),
+                        'org.freedesktop.DBus.Properties')
+        time.sleep(1)
+        self.bus.add_signal_receiver(
+                self.on_property_changed,
+                bus_name='org.bluez',
+                signal_name='PropertiesChanged',
+                dbus_interface='org.freedesktop.DBus.Properties')
 
+# ble functions call when nav button got clicked
+    def bluetooth (self):
+        #BLE  Code
+        
+        for path, ifaces in self.mgr.GetManagedObjects().items():
+            if 'org.bluez.MediaPlayer1' in ifaces:
+                self.player_iface = dbus.Interface(
+                        self.bus.get_object('org.bluez', path),
+                        'org.bluez.MediaPlayer1')
+                self.bt_player_connect_label.setText("Connected")
+                
+            elif 'org.bluez.MediaTransport1' in ifaces:
+                self.transport_prop_iface = dbus.Interface(
+                        self.bus.get_object('org.bluez', path),
+                        'org.freedesktop.DBus.Properties')
+        time.sleep(1)
+        self.bus.add_signal_receiver(
+                self.on_property_changed,
+                bus_name='org.bluez',
+                signal_name='PropertiesChanged',
+                dbus_interface='org.freedesktop.DBus.Properties')
+    
+    def on_property_changed(self,interface, changed, invalidated):
+        if interface != 'org.bluez.MediaPlayer1':
+            return
+        for prop, value in changed.items():
+            if prop == 'Status':
+                print('Playback Status: {}'.format(value))
+                self.status = value
+                if self.status == "playing":
+                    #chnge icon loation
+                    #self.PlaySongBTButton.setIcon(QIcon('/home/pi/Desktop/demo/logos/music_3.svg'))
+                elif self.status == "paused":
+                    #self.PlaySongBTButton.setIcon(QIcon('/home/pi/Desktop/demo/logos/music_4.svg'))
+            elif prop == 'Track':
+                self.track = value
+                for key in ('Title', 'Artist', 'Album'):
+                    print('   {}: {}'.format(key, value.get(key, '')))                    
+                    self.SongNameBTLabel.setText(value.get("Title"))
+                    self.AlbumNameBTLabel.setText(value.get("Album"))
+                    self.ArtistNameBTLabel.setText(value.get("Artist"))
+
+    def play_pause(self):
+        play = False
+        try:
+            if self.status == "playing":
+                self.player_iface.Pause()        
+                self.status = "paused"
+            elif self.status == "paused":
+                self.player_iface.Play()
+                self.status = "playing"
+        except  Exception as inst:
+            print(inst)
+
+    
+    def next_song(self):
+        try:
+            play = False
+            self.player_iface.Next()
+        except:
+            print("next exc")
+
+        
+    
+    def previous_song(self):
+        try:
+            play = False
+            self.player_iface.Previous()
+        except:
+            print("prev excep")
+            
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
         MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
@@ -684,7 +824,65 @@ class Ui_MainWindow(object):
         if count == songLength:
             self.timer.stop()
             self.NextSongUSB()
-    
+ ###CORRECT THEIR INDENTION  
+def init_radio(self,address):
+    try:
+        """initialize hardware"""
+        i2c.write_quick(address)
+        time.sleep(0.1)
+    except IOError:
+        subprocess.call(['i2cdetect', '-y', '1'])
+
+
+def set_freq(self,address, freq):
+    """set Radio to specific frequency"""
+    freq14bit = int (4 * (freq * 1000000 + 225000) / 32768) # Frequency distribution for two bytes (according to the data sheet)
+    freqH = freq14bit>>8 #int (freq14bit / 256)
+    freqL = freq14bit & 0xFF
+
+    data = [0 for i in range(4)] # Descriptions of individual bits in a byte - viz.  catalog sheets
+    init = freqH # freqH # 1.bajt (MUTE bit; Frequency H)  // MUTE is 0x80
+    data[0] = freqL # 2.bajt (frequency L)
+    data[1] = 0xB0 #0b10110000 # 3.bajt (SUD; SSL1, SSL2; HLSI, MS, MR, ML; SWP1)
+    data[2] = 0x10 #0b00010000 # 4.bajt (SWP2; STBY, BL; XTAL; smut; HCC, SNC, SI)
+    data[3] = 0x00 #0b00000000 # 5.bajt (PLREFF; DTC; 0; 0; 0; 0; 0; 0)
+    try:
+      i2c.write_i2c_block_data (address, init, data) # Setting a new frequency to the circuit
+      print("Frequency set to: " + str(freq))
+    except IOError:
+      subprocess.call(['i2cdetect', '-y', '1'])
+def mute(self,address):
+    """"mute radio"""
+    freq14bit = int(4 * (0 * 1000000 + 225000) / 32768)
+    freqL = freq14bit & 0xFF
+    data = [0 for i in range(4)]
+    init = 0x80
+    data[0] = freqL
+    data[1] = 0xB0
+    data[2] = 0x10
+    data[3] = 0x00
+    try:
+        i2c.write_i2c_block_data(address, init, data)
+        print("Radio Muted")
+    except IOError:
+        subprocess.call(['i2cdetect', '-y', '1'])
+
+
+
+def next_fm(self):
+    print("Next FM")
+    self.freq = self.freq + 0.1
+    label = self.freq #change label of fm title
+
+    self.set_freq(i2c_address, self.freq)
+
+def prev_fm(self):
+    print("Previous FM")
+    self.freq = self.freq - 0.1
+    label = self.freq #change label of fm title
+
+    self.set_freq(i2c_address, self.freq)
+
       
 
 
